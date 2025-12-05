@@ -1,0 +1,176 @@
+-- **********************************************
+-- ** STEP 1: CREATE DIMENSION TABLES **
+-- **********************************************
+
+-- 1. DIM_DATE TABLE: Required for splitting the date
+CREATE TABLE IF NOT EXISTS public.dim_date (
+    date_sk             INTEGER IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    game_date_key       DATE NOT NULL UNIQUE,
+    date_year           SMALLINT NOT NULL,
+    date_quarter        SMALLINT NOT NULL,
+    date_month          SMALLINT NOT NULL,
+    date_day            SMALLINT NOT NULL,
+    date_weekday        SMALLINT,
+    date_weekname       VARCHAR(10),
+    DISTSTYLE ALL
+);
+
+-- 2. DIM_TEAM TABLE
+CREATE TABLE IF NOT EXISTS public.dim_team (
+    team_sk             INTEGER IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    team_id             INTEGER NOT NULL UNIQUE,
+    team_name           VARCHAR(256),
+    city                VARCHAR(128),
+    conference          VARCHAR(64),
+    division            VARCHAR(64),
+    DISTSTYLE ALL
+);
+
+-- 3. DIM_PLAYER TABLE
+CREATE TABLE IF NOT EXISTS public.dim_player (
+    player_sk           INTEGER IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    player_id           INTEGER NOT NULL UNIQUE,
+    player_name         VARCHAR(256),
+    position            VARCHAR(64),
+    height              VARCHAR(32),
+    weight              VARCHAR(32),
+    birthdate           DATE,
+    college             VARCHAR(256),
+    season              VARCHAR(32),
+    DISTSTYLE ALL
+);
+
+-- 4. DIM_GAME TABLE
+CREATE TABLE IF NOT EXISTS public.dim_game (
+    game_sk             INTEGER IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    game_id             INTEGER NOT NULL UNIQUE,
+    season              VARCHAR(32),
+    opponent_team_id    VARCHAR(64),
+    home_away           VARCHAR(16),
+    DISTSTYLE ALL
+);
+
+-- **********************************************
+-- ** STEP 2: CREATE FACT TABLE **
+-- **********************************************
+
+-- FACT_GAME_STATS TABLE
+CREATE TABLE IF NOT EXISTS public.fact_game_stats (
+    fact_game_stats_sk  BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    game_sk             INTEGER NOT NULL,
+    player_sk           INTEGER NOT NULL,
+    team_sk             INTEGER NOT NULL,
+    date_sk             INTEGER NOT NULL,
+    min                 INTEGER,
+    fgm                 INTEGER,
+    fga                 INTEGER,
+    fg_pct              FLOAT,
+    reb                 INTEGER,
+    ast                 INTEGER,
+    tov                 INTEGER,
+    stl                 INTEGER,
+    blk                 INTEGER,
+    pts                 INTEGER,
+    plus_minus          INTEGER,
+    nba_fantasy_pts     FLOAT,
+    DISTSTYLE KEY(game_sk),
+    SORTKEY (date_sk)
+);
+
+
+
+-- **********************************************
+-- ** STEP 3: LOAD DIMENSION TABLES **
+-- **********************************************
+
+-- Set the source table name
+SET source_table_name TO 'awsdatacatalog.brunson-game-logs.shared';
+
+-- 1. Load dim_date
+INSERT INTO public.dim_date (
+    game_date_key, date_year, date_quarter, date_month, date_day, date_weekday, date_weekname
+)
+SELECT DISTINCT
+    CAST(t.GAME_DATE AS DATE),
+    EXTRACT(YEAR FROM t.GAME_DATE),
+    EXTRACT(QUARTER FROM t.GAME_DATE),
+    EXTRACT(MONTH FROM t.GAME_DATE),
+    EXTRACT(DAY FROM t.GAME_DATE),
+    EXTRACT(DOW FROM t.GAME_DATE),
+    TO_CHAR(t.GAME_DATE, 'Day')
+FROM 
+    :source_table_name AS t
+WHERE 
+    t.GAME_DATE IS NOT NULL;
+
+-- 2. Load dim_team (Only includes existing columns)
+INSERT INTO public.dim_team (team_id, team_name)
+SELECT DISTINCT
+    t.TEAM_ID,
+    t.TEAM_NAME
+FROM 
+    :source_table_name AS t
+WHERE 
+    t.TEAM_ID IS NOT NULL;
+
+-- 3. Load dim_player (Only includes existing columns)
+INSERT INTO public.dim_player (player_id, player_name, season)
+SELECT DISTINCT
+    t.PLAYER_ID,
+    t.PLAYER_NAME,
+    t.SEASON_YEAR -- SEASON_YEAR from the file maps to the SEASON attribute in the dimension
+FROM 
+    :source_table_name AS t
+WHERE 
+    t.PLAYER_ID IS NOT NULL;
+
+-- 4. Load dim_game (Only includes existing columns)
+INSERT INTO public.dim_game (game_id, season, home_away)
+SELECT DISTINCT
+    t.GAME_ID,
+    t.SEASON_YEAR,
+    t.MATCHUP -- Using MATCHUP as it contains Home/Away information (e.g., 'vs.' or '@')
+FROM 
+    :source_table_name AS t
+WHERE 
+    t.GAME_ID IS NOT NULL;
+
+-- **********************************************
+-- ** STEP 4: LOAD FACT TABLE **
+-- **********************************************
+
+-- Load the fact_game_stats table by joining dimensions on the Natural Keys
+INSERT INTO public.fact_game_stats (
+    game_sk, player_sk, team_sk, date_sk, min, fgm, fga, fg_pct, reb, ast, tov, stl, blk, pts, plus_minus, nba_fantasy_pts
+)
+SELECT
+    -- Look up the Surrogate Keys
+    g.game_sk,
+    p.player_sk,
+    t.team_sk,
+    d.date_sk,
+    
+    -- Insert Measures (Game Statistics) - using correct column names from the file
+    st.MIN,
+    st.FGM,
+    st.FGA,
+    st.FG_PCT,
+    st.REB,
+    st.AST,
+    st.TOV,
+    st.STL,
+    st.BLK,
+    st.PTS,
+    st.PLUS_MINUS,
+    st.NBA_FANTASY_PTS
+FROM
+    :source_table_name AS st 
+-- Join on Natural Keys to fetch Surrogate Keys
+JOIN
+    public.dim_game AS g ON st.GAME_ID = g.game_id
+JOIN
+    public.dim_player AS p ON st.PLAYER_ID = p.player_id
+JOIN
+    public.dim_team AS t ON st.TEAM_ID = t.team_id
+JOIN
+    public.dim_date AS d ON st.GAME_DATE = d.game_date_key;
